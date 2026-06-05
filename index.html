@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Pin Scaling Prototype — Markups &amp; Collaboration</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs" type="module"></script>
+<style>
+  :root {
+    --bg: #f4f4f4;
+    --panel: #ffffff;
+    --border: #e0e0e0;
+    --ink: #3c3c3c;
+    --muted: #767676;
+    --blue: #0696d7;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: "Artifakt Element", -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); background: var(--bg); }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ---- Top bar ---- */
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+    z-index: 10; flex-wrap: wrap;
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 700; }
+  header .hint { font-size: 12px; color: var(--muted); }
+  .spacer { flex: 1; }
+
+  .control { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  button {
+    font: inherit; font-size: 13px; cursor: pointer; border: 1px solid var(--border);
+    background: #fff; color: var(--ink); border-radius: 6px; padding: 6px 10px; line-height: 1;
+  }
+  button:hover { background: #f0f0f0; }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  button.primary.active { background: #006eaf; }
+  button.zoombtn { width: 34px; padding: 6px 0; font-size: 16px; }
+
+  select { font: inherit; font-size: 12px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 6px; background:#fff; }
+
+  /* ---- Readouts ---- */
+  .readout { display:flex; align-items:center; gap: 14px; background:#fafafa; border:1px solid var(--border); border-radius:8px; padding:6px 12px; }
+  .readout .metric { display:flex; flex-direction:column; line-height:1.2; }
+  .readout .metric b { font-size: 15px; }
+  .readout .metric span { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+  /* ---- Viewer ---- */
+  #viewer { flex: 1; overflow: auto; position: relative; display: grid; place-items: center; padding: 40px 40px 140px; }
+
+  /* ---- Floating bottom bar ---- */
+  #floatBar {
+    position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 22px;
+    background: #fff; border: 1px solid var(--border); border-radius: 14px;
+    padding: 12px 20px; box-shadow: 0 8px 28px rgba(0,0,0,.18);
+    z-index: 20; max-width: calc(100vw - 40px); flex-wrap: wrap; justify-content: center;
+  }
+  #stage { position: relative; box-shadow: 0 2px 16px rgba(0,0,0,.18); background:#fff; }
+  #pdfCanvas { display: block; }
+  #pinLayer { position: absolute; inset: 0; }
+  #pinLayer.placing { cursor: crosshair; }
+
+  /* ---- Pin ---- */
+  .pin {
+    position: absolute;
+    /* base footprint at 100% pin-scale; JS overrides --s.
+       Box is the full Figma artboard incl. shadow padding (visible pin ~36px wide at 100%). */
+    --s: 1;
+    width: calc(52px * var(--s));
+    height: calc(57px * var(--s));
+    /* anchor the pin TIP (50%, 79.6% of the box) at the stored point */
+    transform: translate(-50%, -79.6%);
+    pointer-events: auto;
+    cursor: pointer;
+    transition: width .12s ease, height .12s ease;
+  }
+  .pin svg { width: 100%; height: 100%; display:block; }
+  .pin.selected { z-index: 5; }
+  .pin.selected svg .body { stroke: var(--blue); stroke-width: 4; }
+
+  /* zoom curve diagram */
+  #curve { background:#fafafa; border:1px solid var(--border); border-radius:8px; }
+  .curveWrap { display:flex; align-items:center; gap:8px; }
+  .curveWrap small { color: var(--muted); font-size: 10px; max-width: 120px; line-height:1.3; }
+
+  footer { font-size: 11px; color: var(--muted); padding: 6px 16px; background: var(--panel); border-top: 1px solid var(--border); }
+  code { background:#eee; padding:1px 4px; border-radius:3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pin Scaling</h1>
+  <span class="hint">Add pins, then zoom — pins rescale per the Markups guidelines.</span>
+
+  <div class="spacer"></div>
+
+  <div class="control">
+    <label>Status
+      <select id="statusSel">
+        <option value="open">Open</option>
+        <option value="draft">Draft</option>
+        <option value="pending">Pending</option>
+        <option value="inprogress">In progress</option>
+        <option value="completed">Completed</option>
+        <option value="notapproved">Not approved</option>
+        <option value="inreview">In review</option>
+        <option value="closed">Closed</option>
+        <option value="void">Void</option>
+      </select>
+    </label>
+  </div>
+  <button id="addBtn" class="primary">+ Add pin</button>
+  <button id="clearBtn">Clear</button>
+</header>
+
+<div id="viewer">
+  <div id="stage">
+    <canvas id="pdfCanvas"></canvas>
+    <div id="pinLayer"></div>
+  </div>
+</div>
+
+<!-- Floating pin-scale bar, pinned to the bottom of the sheet -->
+<div id="floatBar">
+  <div class="readout">
+    <div class="metric"><b id="zoomVal">100%</b><span>Zoom</span></div>
+    <div class="metric"><b id="pinVal">100%</b><span>Pin scale</span></div>
+  </div>
+  <div class="control">
+    <button class="zoombtn" id="zoomOut">−</button>
+    <input id="zoomSlider" type="range" min="30" max="200" value="100" step="1" style="width:160px" />
+    <button class="zoombtn" id="zoomIn">+</button>
+    <button id="reset">Reset</button>
+  </div>
+  <div class="curveWrap">
+    <canvas id="curve" width="150" height="64"></canvas>
+    <small>Zoom → pin-scale curve. Dot = current.</small>
+  </div>
+</div>
+
+<footer>
+  Scaling rule (monotonic): ≤70%&nbsp;zoom → <b>80%</b> floor &nbsp;•&nbsp; 100%&nbsp;zoom → <b>100%</b> &nbsp;•&nbsp; ≥120%&nbsp;zoom → <b>140%</b> ceiling. Linear between. Pins stay anchored to the drawing; their on-screen size follows this damped curve, not the raw zoom.
+</footer>
+
+<script type="module">
+import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs";
+
+/* ---------- Pin scaling curve (per Figma guidelines, monotonic variant) ----------
+   ≤70% zoom  → 80%  (floor)
+   70→100%    → linear 80% → 100%
+   100→120%   → linear 100% → 140%
+   ≥120% zoom → 140% (ceiling)
+*/
+function pinScaleForZoom(zoomPct) {
+  if (zoomPct <= 70)  return 80;
+  if (zoomPct <= 100) return 80 + (zoomPct - 70) * (20 / 30);
+  if (zoomPct <= 120) return 100 + (zoomPct - 100) * 2;
+  return 140;
+}
+
+/* ---------- Status colors (from Figma variables) ---------- */
+const STATUS = {
+  open:        { fill: "#FAA21B", ring: "#FFFFFF" },
+  draft:       { fill: "#3C3C3C", ring: "#FFFFFF" },
+  pending:     { fill: "#0696D7", ring: "#FFFFFF" },
+  inprogress:  { fill: "#A3BCDC", ring: "#FFFFFF" },
+  completed:   { fill: "#B7D78C", ring: "#FFFFFF" },
+  notapproved: { fill: "#DD2222", ring: "#FFFFFF" },
+  inreview:    { fill: "#8558C5", ring: "#FFFFFF" },
+  closed:      { fill: "#EEEEEE", ring: "#CCCCCC" },
+  void:        { fill: "#CCCCCC", ring: "#FFFFFF" },
+};
+
+/* Exact "Pin States" vector from Figma (node 96:1099): white body, colored
+   status circle, soft drop shadow (dy 7, blur 7, 15% black). viewBox 90.9 x 99.9.
+   Only the circle fill changes per status. uid keeps each filter id unique. */
+function pinSVG(status, uid) {
+  const c = STATUS[status] || STATUS.open;
+  // pale fills need a faint ring to read against the white body
+  const pale = (status === "inprogress" || status === "completed" || status === "closed" || status === "void");
+  const ring = pale ? `stroke="#B5B5B5" stroke-width="2"` : "";
+  const fid = "pinshadow_" + uid;
+  return `
+  <svg viewBox="0 0 90.9183 99.8802" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <g filter="url(#${fid})">
+      <path class="body" d="M45.4592 6.99374C62.8405 6.99374 76.9307 21.0841 76.9308 38.4654C76.9308 47.7064 72.9474 56.0164 66.6047 61.774C65.587 62.8005 54.045 74.4259 50.7033 76.9322C47.2066 79.5546 43.7097 79.5545 40.2131 76.9322C36.7276 74.3181 24.3137 61.7847 24.2326 61.7027H24.2355C17.9384 55.9479 13.9875 47.6683 13.9875 38.4654C13.9876 21.0842 28.0779 6.99379 45.4592 6.99374Z" fill="#ffffff"/>
+      <circle cx="45.4592" cy="38.4656" r="26.2265" fill="${c.fill}" ${ring}/>
+    </g>
+    <defs>
+      <filter id="${fid}" x="0" y="0" width="90.9183" height="99.8802" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+        <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+        <feOffset dy="6.99374"/>
+        <feGaussianBlur stdDeviation="6.99374"/>
+        <feComposite in2="hardAlpha" operator="out"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.15 0" result="dropShadow"/>
+        <feBlend mode="normal" in="SourceGraphic" in2="dropShadow" result="shape"/>
+      </filter>
+    </defs>
+  </svg>`;
+}
+
+/* ---------- State ---------- */
+const pins = [];           // {x, y, status}  x,y normalized 0..1 of page
+let placing = false;
+let selectedStatus = "open";
+let zoomPct = 100;
+let baseScale = 1;         // pdf scale that == 100% zoom (fit-to-viewer-width)
+let pdfPage = null;
+const DPR = window.devicePixelRatio || 1;
+
+const stage    = document.getElementById("stage");
+const canvas   = document.getElementById("pdfCanvas");
+const ctx      = canvas.getContext("2d");
+const pinLayer = document.getElementById("pinLayer");
+const viewer   = document.getElementById("viewer");
+
+/* ---------- Render the PDF page at current zoom ---------- */
+async function renderPdf() {
+  if (!pdfPage) return;
+  const scale = baseScale * (zoomPct / 100);
+  const vp = pdfPage.getViewport({ scale });
+  canvas.width  = Math.floor(vp.width  * DPR);
+  canvas.height = Math.floor(vp.height * DPR);
+  canvas.style.width  = vp.width + "px";
+  canvas.style.height = vp.height + "px";
+  stage.style.width  = vp.width + "px";
+  stage.style.height = vp.height + "px";
+  const renderCtx = { canvasContext: ctx, viewport: vp, transform: DPR !== 1 ? [DPR,0,0,DPR,0,0] : null };
+  await pdfPage.render(renderCtx).promise;
+  layoutPins();
+}
+
+/* ---------- Place / layout pins ---------- */
+function layoutPins() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  const pinScale = pinScaleForZoom(zoomPct) / 100;
+  [...pinLayer.children].forEach((el, i) => {
+    const p = pins[i];
+    el.style.left = (p.x * w) + "px";
+    el.style.top  = (p.y * h) + "px";
+    el.style.setProperty("--s", pinScale.toFixed(3));
+  });
+}
+
+function renderPins() {
+  pinLayer.innerHTML = "";
+  pins.forEach((p, i) => {
+    const el = document.createElement("div");
+    el.className = "pin";
+    el.innerHTML = pinSVG(p.status, i);
+    el.title = p.status;
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      [...pinLayer.children].forEach(c => c.classList.remove("selected"));
+      el.classList.toggle("selected");
+    });
+    pinLayer.appendChild(el);
+  });
+  layoutPins();
+}
+
+pinLayer.addEventListener("click", (e) => {
+  if (!placing) return;
+  const r = stage.getBoundingClientRect();
+  const x = (e.clientX - r.left) / r.width;
+  const y = (e.clientY - r.top)  / r.height;
+  pins.push({ x, y, status: selectedStatus });
+  renderPins();
+});
+
+/* ---------- Zoom controls ---------- */
+function setZoom(z) {
+  zoomPct = Math.max(30, Math.min(200, Math.round(z)));
+  document.getElementById("zoomSlider").value = zoomPct;
+  document.getElementById("zoomVal").textContent = zoomPct + "%";
+  const ps = Math.round(pinScaleForZoom(zoomPct));
+  document.getElementById("pinVal").textContent = ps + "%";
+  drawCurve();
+  renderPdf();
+}
+
+document.getElementById("zoomIn").onclick  = () => setZoom(zoomPct + 10);
+document.getElementById("zoomOut").onclick = () => setZoom(zoomPct - 10);
+document.getElementById("zoomSlider").oninput = (e) => setZoom(+e.target.value);
+document.getElementById("reset").onclick = () => setZoom(100);
+
+const addBtn = document.getElementById("addBtn");
+addBtn.onclick = () => {
+  placing = !placing;
+  addBtn.classList.toggle("active", placing);
+  pinLayer.classList.toggle("placing", placing);
+  addBtn.textContent = placing ? "✓ Placing… (click drawing)" : "+ Add pin";
+};
+document.getElementById("clearBtn").onclick = () => { pins.length = 0; renderPins(); };
+document.getElementById("statusSel").onchange = (e) => { selectedStatus = e.target.value; };
+
+/* ---------- Mini curve diagram ---------- */
+const curve = document.getElementById("curve");
+const cctx = curve.getContext("2d");
+function curveX(zoom) { return ( (zoom - 30) / (200 - 30) ) * (curve.width - 8) + 4; }
+function curveY(pct)  { return curve.height - 6 - ((pct - 70) / (150 - 70)) * (curve.height - 16); }
+function drawCurve() {
+  cctx.clearRect(0,0,curve.width,curve.height);
+  // axis hints at 100% zoom
+  cctx.strokeStyle = "#ddd"; cctx.lineWidth = 1;
+  cctx.beginPath(); cctx.moveTo(curveX(100), 2); cctx.lineTo(curveX(100), curve.height-2); cctx.stroke();
+  // curve
+  cctx.strokeStyle = "#0696d7"; cctx.lineWidth = 2; cctx.beginPath();
+  for (let z = 30; z <= 200; z += 2) {
+    const X = curveX(z), Y = curveY(pinScaleForZoom(z));
+    z === 30 ? cctx.moveTo(X, Y) : cctx.lineTo(X, Y);
+  }
+  cctx.stroke();
+  // current dot
+  cctx.fillStyle = "#3c3c3c";
+  cctx.beginPath();
+  cctx.arc(curveX(zoomPct), curveY(pinScaleForZoom(zoomPct)), 3.5, 0, Math.PI*2);
+  cctx.fill();
+}
+
+/* ---------- Boot ---------- */
+async function init() {
+  const doc = await pdfjsLib.getDocument("drawing.pdf").promise;
+  pdfPage = await doc.getPage(1);
+  // fit page width to viewer (minus padding) at 100% zoom
+  const natural = pdfPage.getViewport({ scale: 1 });
+  const avail = viewer.clientWidth - 80;
+  baseScale = Math.min(avail / natural.width, 1.6);
+  setZoom(100);
+
+  // seed a few demo pins so the effect is visible immediately
+  pins.push({ x: 0.30, y: 0.32, status: "open" });
+  pins.push({ x: 0.55, y: 0.45, status: "completed" });
+  pins.push({ x: 0.42, y: 0.62, status: "notapproved" });
+  renderPins();
+}
+init().catch(err => {
+  document.getElementById("viewer").innerHTML =
+    "<p style='color:#b00;max-width:480px'>Couldn't load the PDF: " + err.message +
+    "<br><br>Make sure this page is served over http (not opened as a file://).</p>";
+  console.error(err);
+});
+</script>
+</body>
+</html>
