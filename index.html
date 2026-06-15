@@ -420,12 +420,6 @@ async function init() {
   baseScale = Math.min(avail / natural.width, 1.6);
   setZoom(100);
 
-  // seed a few demo pins so the effect is visible immediately
-  pins.push({ x: 0.30, y: 0.32, status: "open",        type: "regular",   initials: "AB" });
-  pins.push({ x: 0.55, y: 0.45, status: "completed",   type: "regular",   initials: "TC" });
-  pins.push({ x: 0.42, y: 0.62, status: "notapproved", type: "regular",   initials: "MK" });
-  pins.push({ x: 0.65, y: 0.30, status: "pending",     type: "projected", initials: "AB" });
-  pins.push({ x: 0.25, y: 0.55, status: "inreview",    type: "projected", initials: "TC" });
   renderPins();
 }
 init().catch(err => {
